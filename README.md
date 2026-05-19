@@ -1,38 +1,86 @@
 # Release Notes Tool
 
-A desktop GUI that automates the process of generating internal `DevNotes.txt`
-and customer-facing `ReleaseNotes.txt` files from raw developer check-in notes.
-
-Built with [customtkinter](https://github.com/TomSchimansky/CustomTkinter), styled
-to match the Lam Research visual identity (navy + green).
+A desktop GUI that automates an internal release-notes workflow I used to do
+by hand at work. Built to solve a real, recurring pain point — generating
+customer-facing release notes from raw developer check-in notes — and to
+explore design patterns around safe file mutation, preview-before-commit, and
+modern Python GUI work.
 
 ---
 
-## Features
+## Problem
 
-- **All-in-One pipeline** — feed in `DevNotes.txt`, a patch label, `checkinid.txt`,
-  and `Notes.txt`, and the tool produces an updated `DevNotes.txt` plus a freshly
-  generated `ReleaseNotes.txt` in one click.
-- **Preview before write** — every run opens a modal preview window with three
-  tabs (Check-in IDs / DevNotes preview / ReleaseNotes preview) so you can verify
-  exactly what will change before any file is touched.
-- **Missing-ID detection** — if an ID in `checkinid.txt` does not appear in
-  `Notes.txt`, the preview flags it with a yellow warning so you can fix the
-  input before committing.
+Every patch release at work required manually:
+
+1. Filtering 50+ developer check-ins by ID
+2. Stripping internal-only metadata (`Developer:`, `Timestamp:`, auto-merge
+   blocks, …)
+3. Reformatting each section to match the customer-facing template
+4. Inserting the new patch block in the correct location of `DevNotes.txt`
+5. Re-generating the customer-facing `ReleaseNotes.txt`
+
+The work took roughly 30 minutes per release and was error-prone. A single
+typo in a check-in ID would silently exclude that fix from the released
+notes, and there was no easy way to catch it until a customer noticed.
+
+## Solution
+
+|                                  | Before          | After             |
+| -------------------------------- | --------------- | ----------------- |
+| Time per release                 | ~30 min         | ~30 sec           |
+| Manual reformatting steps        | 50+             | 0                 |
+| Silent omissions on typo'd IDs   | Possible        | Flagged in preview|
+| Rollback if something is wrong   | Manual undo     | Auto backup       |
+
+---
+
+## Key features
+
+- **Preview-before-write** — every run opens a modal preview window with
+  three tabs (Check-in IDs / DevNotes preview / ReleaseNotes preview) so I
+  can verify exactly what will change before any file is touched.
+- **Missing-ID detection** — if a check-in ID appears in `checkinid.txt` but
+  not in `Notes.txt`, the preview flags it with a yellow warning before
+  commit.
 - **Automatic timestamped backups** — every commit writes
-  `DevNotes.YYYYMMDD_HHMMSS.bak.txt` before modifying the original, so multiple
-  runs in the same day never overwrite each other.
+  `DevNotes.YYYYMMDD_HHMMSS.bak.txt` before modifying the original, so
+  multiple runs in the same day never overwrite each other.
 - **Flexible patch labels** — `Patch`, `LabPatch`, `HomeMade`, or any custom
   prefix, with integer (`10`) or decimal (`5.1`) numbers.
-- **Standalone helper pages** — run just one stage if you only need
-  `Notes → For_DevNotes` filtering or `DevNotes → ReleaseNotes` regeneration.
+- **Format normalization** — handles two real-world note formats developers
+  use (section header on its own line vs. inline with content) without
+  breaking either.
+- **Standalone helper pages** — run just one stage of the pipeline if that's
+  all you need.
 
 ---
 
-## Screenshot
+## Design decisions
 
-(Add a screenshot here once available — the All-in-One page and the Preview
-dialog are the two views worth showing.)
+A few choices worth calling out:
+
+- **Two-stage pipeline (`build_preview` + `commit_preview`).** Previewing
+  is a pure read-only operation that touches no files. Committing is
+  the only place that mutates disk. This separation makes the preview
+  trustworthy and made it easy to add the modal preview window without
+  duplicating logic.
+- **Timestamped backups instead of a single `.bak`.** Multiple runs per day
+  never clobber each other. Naming pattern is sortable.
+- **Generalized patch regex.** `^[A-Za-z]+\d+(?:\.\d+)?$` covers
+  `Patch10`, `LabPatch3`, `HomeMade5.1`, and arbitrary user-defined
+  prefixes — matching how teams actually label patches in practice.
+- **In-memory text transforms with thin file-IO wrappers.** All the parsing
+  and reformatting is pure-function on strings; only two small functions
+  read or write files. Makes the core logic easy to test and reason about.
+- **customtkinter for the GUI.** Native-looking widgets, modern theming,
+  and no platform-specific drawing code. Single-file build with PyInstaller.
+
+---
+
+## Screenshots
+
+*(Add screenshots here. The All-in-One page and the Preview dialog are the
+two views worth showing.)*
 
 ---
 
@@ -40,8 +88,6 @@ dialog are the two views worth showing.)
 
 - Python 3.10 or newer
 - [customtkinter](https://pypi.org/project/customtkinter/)
-
-Install dependencies:
 
 ```bash
 pip install customtkinter
@@ -51,8 +97,6 @@ pip install customtkinter
 
 ## Usage
 
-Clone the repo and run:
-
 ```bash
 python ReleaseNotesTool_UI_ctk.py
 ```
@@ -60,20 +104,13 @@ python ReleaseNotesTool_UI_ctk.py
 ### All-in-One workflow
 
 1. Select your existing `DevNotes.txt`.
-2. Pick the patch type from the dropdown (`Patch`, `LabPatch`, `HomeMade`, or
-   type your own) and enter the patch number (e.g. `10` or `5.1`).
+2. Pick the patch type from the dropdown (`Patch`, `LabPatch`, `HomeMade`,
+   or type your own) and enter the patch number (`10` or `5.1`).
 3. Select `checkinid.txt` (the list of check-in IDs to include).
 4. Select `Notes.txt` (the raw developer notes).
 5. Click **Run Full Pipeline**.
 6. Review the Preview dialog. If anything looks off, click **Cancel**.
 7. Click **Confirm & Write Files** to apply the changes.
-
-The tool will:
-
-- Insert a new patch block (label + today's date + filtered check-ins) into
-  `DevNotes.txt` directly below the `Base Version:` line.
-- Generate a fresh `ReleaseNotes.txt` in the same folder.
-- Save a timestamped backup of the original `DevNotes.txt`.
 
 ### Patch label examples
 
@@ -83,24 +120,26 @@ The tool will:
 | Patch     | 5.1    | `Patch5.1`    |
 | LabPatch  | 3      | `LabPatch3`   |
 | HomeMade  | 5      | `HomeMade5`   |
-| (custom)  | 2      | `HotFix2`     |
+| *custom*  | 2      | `HotFix2`     |
 
 ---
 
 ## File structure
 
 ```
-ReleaseNotesTool/
-├── ReleaseNotesTool_UI_ctk.py   # Main GUI entry point
+NoteGenerator/
+├── ReleaseNotesTool_UI_ctk.py   # GUI entry point (customtkinter)
+├── ReleaseNotesTool_UI.py       # Original tkinter prototype (kept for reference)
 ├── full_pipeline.py             # build_preview() + commit_preview() + run_full_pipeline()
 ├── notes_to_for_devnotes.py     # Filter raw Notes.txt by check-in IDs
 ├── ReleaseNotesCreatorv4.py     # Convert DevNotes.txt → ReleaseNotes.txt
+├── docs/                        # Plain-text versions of the README
 └── README.md
 ```
 
 ### Pipeline architecture
 
-The backend is split so that previewing has no side effects:
+The backend is structured so that previewing is side-effect free:
 
 ```
 build_preview(devnotes, patch, checkinids, notes)
@@ -130,9 +169,9 @@ bob 0.3968
 
 ### `Notes.txt`
 
-Standard internal notes format. Each check-in block starts with `Checkin ID:`
-and is separated by 80-dash separator lines. The tool automatically strips
-out internal-only headers (`Developer:`, `Timestamp:`, `Release Notes Needed:`,
+Raw developer notes. Each check-in block starts with `Checkin ID:` and is
+separated by 80-dash separator lines. The tool automatically strips out
+internal-only headers (`Developer:`, `Timestamp:`, `Release Notes Needed:`,
 `[Auto Merge Wizard]` blocks, etc.) before inserting into DevNotes.
 
 ### `DevNotes.txt`
@@ -144,27 +183,33 @@ immediately below this line.
 
 ## Building a standalone executable
 
-To package the app as a single `.exe` (Windows) or binary (macOS/Linux):
+### macOS / Linux
 
 ```bash
 pip install pyinstaller
 
-python -m PyInstaller \
-    --clean \
-    --onefile \
-    --windowed \
-    --collect-all customtkinter \
-    --collect-all darkdetect \
-    --name ReleaseNotesTool \
-    ReleaseNotesTool_UI_ctk.py
+python3 -m PyInstaller --clean --onefile --windowed \
+    --collect-all customtkinter --collect-all darkdetect \
+    --name ReleaseNotesTool ReleaseNotesTool_UI_ctk.py
 ```
 
-The result is in `dist/ReleaseNotesTool.exe`. The `--collect-all` flags are
-required so that customtkinter's theme and font assets are bundled inside the
-executable.
+### Windows
 
-> **Note:** PyInstaller builds are platform-specific. To distribute to Windows
-> users, build on Windows; to distribute to macOS users, build on macOS.
+```bat
+pip install pyinstaller
+
+python -m PyInstaller --clean --onefile --windowed --collect-all customtkinter --collect-all darkdetect --name ReleaseNotesTool ReleaseNotesTool_UI_ctk.py
+```
+
+Output:
+- macOS / Linux: `dist/ReleaseNotesTool`
+- Windows: `dist/ReleaseNotesTool.exe`
+
+The `--collect-all` flags are required so that customtkinter's theme and
+font assets are bundled inside the executable.
+
+> **Note:** PyInstaller builds are platform-specific. Build on the OS you
+> intend to distribute to.
 
 ---
 
@@ -178,15 +223,17 @@ DevNotes.20260516_205412.bak.txt   ← backup from May 16, 8:54 PM
 DevNotes.20260517_091203.bak.txt   ← backup from May 17, 9:12 AM
 ```
 
-To restore, manually rename the desired backup to `DevNotes.txt` (overwriting
-the current one). A "Restore from Backup" UI flow is planned for a future
-release.
+To restore, rename the desired backup to `DevNotes.txt` (overwriting the
+current one). An in-app "Restore from Backup" flow is on the roadmap.
 
 ---
 
-## License
+## Roadmap
 
-(Add your preferred license here, e.g. MIT, Apache 2.0, or "Internal use only".)
+- [ ] In-app backup restoration UI
+- [ ] Remember last-used file paths between sessions
+- [ ] Auto-suggest next patch number from existing DevNotes
+- [ ] Optional output preview pane inside the main window
 
 ---
 
