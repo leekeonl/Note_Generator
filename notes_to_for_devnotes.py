@@ -13,6 +13,25 @@ REMOVE_HEADERS = (
 )
 AUTO_MERGE = "[Auto Merge Wizard]"
 
+# Known section headers that may appear in dev notes. Only these are
+# normalized when found inline; arbitrary bracketed text in body content
+# (e.g. "[ CVS ]", "[ Lam2300_V3\Install\... ]") is left alone.
+KNOWN_SECTIONS = (
+    "Issue Description",
+    "Feature Description",
+    "Solution",
+    "Root Cause",
+    "Internal Notes",
+)
+
+# Match a known section header that has content on the same line, e.g.
+#   [Issue Description] EDA returns "Not Enough Memory"...
+# Captures: (1) the section header in canonical form, (2) the inline content.
+INLINE_SECTION_RE = re.compile(
+    r'^\s*\[\s*(' + "|".join(re.escape(s) for s in KNOWN_SECTIONS) + r')\s*\]\s+(\S.*)$',
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class ForDevNotesResult:
@@ -87,6 +106,15 @@ def build_for_devnotes_text(
             continue
 
         if stripped.startswith(REMOVE_HEADERS):
+            continue
+
+        # Normalize inline section headers:  [Section] content  →  [Section]\n\tcontent
+        # Only known section names are touched, so arbitrary bracketed text
+        # in body content (e.g. "[ CVS ]") is preserved as-is.
+        m = INLINE_SECTION_RE.match(line)
+        if m:
+            out.append(f"[{m.group(1)}]")    # canonicalized section header
+            out.append("\t" + m.group(2))    # the content, indented with a tab
             continue
 
         out.append(line)
