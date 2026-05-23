@@ -62,6 +62,7 @@ class PipelinePreview:
     requested_checkin_ids: list[str] = field(default_factory=list)
     included_checkin_ids: list[str] = field(default_factory=list)
     missing_checkin_ids: list[str] = field(default_factory=list)
+    pr_to_checkins: dict[str, list[str]] = field(default_factory=dict)   # PR → list of checkin IDs it resolved to
 
 
 # =============================================================================
@@ -220,6 +221,7 @@ def build_preview(
         requested_checkin_ids=fd_result.requested_ids,
         included_checkin_ids=included,
         missing_checkin_ids=fd_result.missing_ids,
+        pr_to_checkins=fd_result.pr_to_checkins,
     )
 
 

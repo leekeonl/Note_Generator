@@ -1,7 +1,7 @@
 """
 ReleaseNotesTool_UI_ctk.py
 
-Modern UI for the Release Notes Tool in the Lam Research visual style:
+Modern UI for the Release Notes Tool:
   - Dark navy sidebar (#0b1426)
   - Green accent (#1d9e75) for active state and primary actions
   - White card surfaces in the main panel
@@ -25,9 +25,9 @@ from ReleaseNotesCreatorv4 import process_dev_notes
 
 
 # =============================================================================
-# Color palette (Lam Research-inspired)
+# Color palette (industrial dark theme)
 # =============================================================================
-NAVY        = "#0b1426"   # sidebar / top bar
+NAVY        = "#0b1426"   # sidebar / top bar background
 NAVY_HOVER  = "#142036"   # sidebar nav hover
 NAVY_LIGHT  = "#1a2740"   # subtle divider
 GREEN       = "#1d9e75"   # active / primary
@@ -44,20 +44,18 @@ TEXT_FAINT  = "#8895ab"   # tertiary text
 # =============================================================================
 # Reusable widgets
 # =============================================================================
-class LamLogo(ctk.CTkFrame):
+class BrandMark(ctk.CTkFrame):
     """
-    The Lam Research mark + 'Lam RESEARCH' wordmark.
+    Generic triangle mark drawn directly on a canvas — no image asset required.
 
-    The mark is a white triangle with a smaller triangular notch cut out at its
-    base, mimicking the official Lam Research geometric logo. Since tkinter
-    Canvas can't do real shape subtraction, we draw the outer white triangle
-    then overlay a smaller triangle filled with the background (navy) color.
+    Renders a white triangle with a smaller triangular notch cut out of its
+    base. Used as a neutral brand mark for the application's top bar.
     """
     def __init__(self, master, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
 
         import tkinter as tk
-        W, H = 30, 26
+        W, H = 44, 38
         self.canvas = tk.Canvas(
             self, width=W, height=H,
             bg=NAVY, highlightthickness=0, bd=0,
@@ -72,8 +70,7 @@ class LamLogo(ctk.CTkFrame):
         )
 
         # Inner cutout triangle — same color as background, sits at the bottom
-        # center, pointing up. This creates the notched-base effect of the
-        # actual Lam mark.
+        # center pointing up. This creates the notched-base effect.
         inner_h = H * 0.45
         inner_w = W * 0.42
         cx = W / 2
@@ -85,16 +82,7 @@ class LamLogo(ctk.CTkFrame):
             fill=NAVY, outline="",
         )
 
-        self.canvas.grid(row=0, column=0, padx=(0, 10))
-
-        ctk.CTkLabel(
-            self, text="Lam", text_color="white",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        ).grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(
-            self, text="RESEARCH", text_color="#c8d0dd",
-            font=ctk.CTkFont(size=12, weight="normal"),
-        ).grid(row=0, column=2, padx=(4, 0), sticky="w")
+        self.canvas.grid(row=0, column=0, sticky="w")
 
 
 class NavItem(ctk.CTkButton):
@@ -426,16 +414,18 @@ class PreviewDialog(ctk.CTkToplevel):
         wrap.grid(row=0, column=0, sticky="nsew", padx=16, pady=12)
         wrap.grid_columnconfigure(0, weight=1)
 
+        row_idx = 0
+
         # Missing IDs section (highlighted if any)
         if self.preview.missing_checkin_ids:
             warn = ctk.CTkFrame(wrap, fg_color="#fef3c7", corner_radius=8)
-            warn.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+            warn.grid(row=row_idx, column=0, sticky="ew", pady=(0, 14))
             warn.grid_columnconfigure(0, weight=1)
             ctk.CTkLabel(
                 warn,
                 text=(
                     f"⚠ {len(self.preview.missing_checkin_ids)} ID(s) in checkinid.txt "
-                    f"were NOT found in Notes.txt:"
+                    f"could not be resolved to any check-in:"
                 ),
                 text_color="#78350f",
                 font=ctk.CTkFont(size=13, weight="bold"),
@@ -448,32 +438,72 @@ class PreviewDialog(ctk.CTkToplevel):
                 font=ctk.CTkFont(size=12, family="Courier"),
                 anchor="w", justify="left", wraplength=820,
             ).grid(row=1, column=0, padx=14, pady=(0, 10), sticky="w")
+            row_idx += 1
+
+        # PR resolution section — show how each PR mapped to one or more check-ins
+        if self.preview.pr_to_checkins:
+            pr_info = ctk.CTkFrame(wrap, fg_color="#e6f5ef", corner_radius=8)
+            pr_info.grid(row=row_idx, column=0, sticky="ew", pady=(0, 14))
+            pr_info.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                pr_info,
+                text=f"ℹ PR numbers resolved to check-ins:",
+                text_color="#0b1426",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                anchor="w",
+            ).grid(row=0, column=0, padx=14, pady=(10, 4), sticky="w")
+            for sub_i, (pr, checkins) in enumerate(self.preview.pr_to_checkins.items(), start=1):
+                ctk.CTkLabel(
+                    pr_info,
+                    text=f"  {pr}  →  {', '.join(checkins)}",
+                    text_color="#0b1426",
+                    font=ctk.CTkFont(size=12, family="Courier"),
+                    anchor="w", justify="left",
+                ).grid(row=sub_i, column=0, padx=14,
+                       pady=(0, 10 if sub_i == len(self.preview.pr_to_checkins) else 0),
+                       sticky="w")
+            row_idx += 1
 
         # Included IDs section
         ctk.CTkLabel(
             wrap,
             text=f"Check-ins that will be added ({len(self.preview.included_checkin_ids)}):",
             text_color=TEXT, font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
-        ).grid(row=1, column=0, sticky="w", pady=(0, 8))
+        ).grid(row=row_idx, column=0, sticky="w", pady=(0, 8))
+        row_idx += 1
+
+        # Build a reverse map: checkin → PR(s) that brought it in, so we can
+        # annotate each included row.
+        checkin_to_prs: dict[str, list[str]] = {}
+        for pr, checkins in self.preview.pr_to_checkins.items():
+            for cid in checkins:
+                checkin_to_prs.setdefault(cid, []).append(pr)
 
         if not self.preview.included_checkin_ids:
             ctk.CTkLabel(
                 wrap, text="(none)", text_color=TEXT_FAINT,
                 font=ctk.CTkFont(size=12), anchor="w",
-            ).grid(row=2, column=0, sticky="w")
+            ).grid(row=row_idx, column=0, sticky="w")
         else:
-            for i, cid in enumerate(self.preview.included_checkin_ids, start=2):
+            for cid in self.preview.included_checkin_ids:
                 row = ctk.CTkFrame(wrap, fg_color=BG, corner_radius=6)
-                row.grid(row=i, column=0, sticky="ew", pady=2)
+                row.grid(row=row_idx, column=0, sticky="ew", pady=2)
                 row.grid_columnconfigure(1, weight=1)
                 ctk.CTkLabel(
                     row, text="✓", text_color=GREEN,
                     font=ctk.CTkFont(size=14, weight="bold"), width=24,
                 ).grid(row=0, column=0, padx=(10, 4), pady=6)
+                # If this checkin was pulled in via one or more PRs, annotate it
+                prs = checkin_to_prs.get(cid, [])
+                if prs:
+                    text = f"{cid}    (via {', '.join(prs)})"
+                else:
+                    text = cid
                 ctk.CTkLabel(
-                    row, text=cid, text_color=TEXT,
+                    row, text=text, text_color=TEXT,
                     font=ctk.CTkFont(size=12, family="Courier"), anchor="w",
                 ).grid(row=0, column=1, padx=(0, 10), pady=6, sticky="w")
+                row_idx += 1
 
     def _fill_text_tab(self, parent, content: str, highlight: str = ""):
         """
@@ -594,19 +624,19 @@ class ReleaseNotesApp(ctk.CTk):
     # Top bar
     # ------------------------------------------------------------------
     def _build_topbar(self):
-        bar = ctk.CTkFrame(self, fg_color=NAVY, corner_radius=0, height=56)
+        bar = ctk.CTkFrame(self, fg_color=NAVY, corner_radius=0, height=60)
         bar.grid(row=0, column=0, sticky="ew")
         bar.grid_propagate(False)
         bar.grid_columnconfigure(2, weight=1)
 
-        LamLogo(bar).grid(row=0, column=0, padx=20, pady=14, sticky="w")
+        BrandMark(bar).grid(row=0, column=0, padx=20, pady=11, sticky="w")
 
-        # Vertical divider + product name
-        sep = ctk.CTkFrame(bar, fg_color=NAVY_LIGHT, width=1, height=24)
-        sep.grid(row=0, column=1, padx=(0, 14), pady=16)
+        # Vertical divider between logo and app name
+        sep = ctk.CTkFrame(bar, fg_color=NAVY_LIGHT, width=1, height=26)
+        sep.grid(row=0, column=1, padx=(4, 14), pady=17)
 
         ctk.CTkLabel(
-            bar, text="Release Notes Tool",
+            bar, text="Release Notes Generator",
             text_color="#c8d0dd", font=ctk.CTkFont(size=14),
         ).grid(row=0, column=2, sticky="w")
 
@@ -650,16 +680,12 @@ class ReleaseNotesApp(ctk.CTk):
             side.grid_columnconfigure(0, weight=1)
             self.nav_items[key] = item
 
-        # Footer: author credit + version (row 99 is the spacer that pushes
-        # these to the bottom of the sidebar)
+        # Footer: version (row 99 is the spacer that pushes this to the
+        # bottom of the sidebar)
         ctk.CTkLabel(
-            side, text="Written by Matthew Lee", text_color=TEXT_FAINT,
+            side, text="Version 1.1.0", text_color=TEXT_FAINT,
             font=ctk.CTkFont(size=11),
-        ).grid(row=100, column=0, padx=20, pady=(18, 0), sticky="w")
-        ctk.CTkLabel(
-            side, text="Version 1.0.0", text_color=TEXT_FAINT,
-            font=ctk.CTkFont(size=11),
-        ).grid(row=101, column=0, padx=20, pady=(2, 18), sticky="w")
+        ).grid(row=100, column=0, padx=20, pady=18, sticky="w")
 
     # ------------------------------------------------------------------
     # Main content area (one frame per page, stacked, raised on demand)
@@ -723,7 +749,7 @@ class ReleaseNotesApp(ctk.CTk):
             ("release",      "↻", "DevNotes → ReleaseNotes",
              "Regenerate ReleaseNotes.txt from\nan existing DevNotes file."),
             ("home",         "✓", "About",
-             "Lam Research release notes\nautomation, v1.0.0."),
+             "Release notes\nautomation, v1.1.0."),
         ]
         for i, (target, icon, title, desc) in enumerate(cards):
             self._home_card(grid, i // 2, i % 2, icon, title, desc, target)
@@ -781,7 +807,7 @@ class ReleaseNotesApp(ctk.CTk):
 
         self.aio_devnotes  = FileField(inner, "DevNotes.txt",  "Select your existing DevNotes file")
         self.aio_patch     = PatchTypeNumberField(inner, "Patch Number")
-        self.aio_checkinid = FileField(inner, "checkinid.txt", "List of check-in IDs to include")
+        self.aio_checkinid = FileField(inner, "checkinid.txt", "Check-in IDs or PR numbers to include")
         self.aio_notes     = FileField(inner, "Notes.txt",     "Raw developer notes")
 
         for i, w in enumerate((self.aio_devnotes, self.aio_patch,
@@ -875,7 +901,7 @@ class ReleaseNotesApp(ctk.CTk):
         inner.grid(row=0, column=0, padx=24, pady=20, sticky="ew")
         inner.grid_columnconfigure(0, weight=1)
 
-        self.fd_checkinid = FileField(inner, "checkinid.txt", "List of check-in IDs")
+        self.fd_checkinid = FileField(inner, "checkinid.txt", "Check-in IDs or PR numbers")
         self.fd_notes     = FileField(inner, "Notes.txt",     "Raw developer notes")
 
         self.fd_checkinid.grid(row=0, column=0, sticky="ew")
