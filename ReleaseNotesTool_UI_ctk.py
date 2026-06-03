@@ -5,7 +5,9 @@ Modern UI for the Release Notes Tool:
   - Dark navy sidebar (#0b1426)
   - Green accent (#1d9e75) for active state and primary actions
   - White card surfaces in the main panel
-  - Sidebar navigation (Home / All-in-One / Notes → For_DevNotes / DevNotes → ReleaseNotes)
+  - Sidebar navigation:
+      Home / Auto-Generate / Manual-Generate /
+      Notes → For_DevNotes / DevNotes → ReleaseNotes
 
 Requires:  pip install customtkinter
 Reuses backend modules:
@@ -23,9 +25,16 @@ from full_pipeline import build_preview, commit_preview, PipelinePreview
 from notes_to_for_devnotes import generate_for_devnotes
 from ReleaseNotesCreatorv4 import process_dev_notes
 
+try:
+    from auto_generate_page import AutoGeneratePage
+    HAS_AUTO_GENERATE = True
+except ImportError as e:
+    print(f"Auto-Generate not available: {e}")
+    HAS_AUTO_GENERATE = False
+
 
 # =============================================================================
-# Color palette (industrial dark theme)
+# Color palette
 # =============================================================================
 NAVY        = "#0b1426"   # sidebar / top bar background
 NAVY_HOVER  = "#142036"   # sidebar nav hover
@@ -46,43 +55,50 @@ TEXT_FAINT  = "#8895ab"   # tertiary text
 # =============================================================================
 class BrandMark(ctk.CTkFrame):
     """
-    Generic triangle mark drawn directly on a canvas — no image asset required.
+    A small canvas-drawn brand mark for the top bar — a triangular logo
+    with a notch, rendered using tkinter's Canvas. No external image
+    asset required.
 
-    Renders a white triangle with a smaller triangular notch cut out of its
-    base. Used as a neutral brand mark for the application's top bar.
+    The shape is deliberately abstract so the app reads as a generic
+    "release notes tool" rather than being tied to any specific brand.
+    Customize freely if you fork this project.
     """
+    SIZE = 44  # canvas square size in pixels
+
     def __init__(self, master, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
-
-        import tkinter as tk
-        W, H = 44, 38
-        self.canvas = tk.Canvas(
-            self, width=W, height=H,
-            bg=NAVY, highlightthickness=0, bd=0,
+        canvas = ctk.CTkCanvas(
+            self, width=self.SIZE, height=self.SIZE,
+            highlightthickness=0, bg=NAVY,
         )
+        canvas.grid(row=0, column=0, sticky="w")
+        self._draw(canvas)
 
-        # Outer white triangle (apex at top center)
-        self.canvas.create_polygon(
-            W / 2, 1,        # top apex
-            W - 1, H - 1,    # bottom right
-            1, H - 1,        # bottom left
+        # Wordmark next to the canvas
+        ctk.CTkLabel(
+            self, text="Release Notes Tool",
+            text_color="white",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=0, column=1, padx=(12, 0), sticky="w")
+
+    def _draw(self, canvas):
+        s = self.SIZE
+        pad = 6
+        # Outer triangle pointing up
+        canvas.create_polygon(
+            s // 2, pad,                 # top
+            s - pad, s - pad,            # bottom-right
+            pad, s - pad,                # bottom-left
             fill="white", outline="",
         )
-
-        # Inner cutout triangle — same color as background, sits at the bottom
-        # center pointing up. This creates the notched-base effect.
-        inner_h = H * 0.45
-        inner_w = W * 0.42
-        cx = W / 2
-        base_y = H - 2
-        self.canvas.create_polygon(
-            cx, base_y - inner_h,            # inner apex (pointing up)
-            cx + inner_w / 2, base_y,        # inner bottom right
-            cx - inner_w / 2, base_y,        # inner bottom left
+        # V-notch cut from the bottom (drawn in NAVY to match background)
+        notch = 9
+        canvas.create_polygon(
+            s // 2, s - pad - notch,
+            s // 2 + notch, s - pad,
+            s // 2 - notch, s - pad,
             fill=NAVY, outline="",
         )
-
-        self.canvas.grid(row=0, column=0, sticky="w")
 
 
 class NavItem(ctk.CTkButton):
@@ -599,8 +615,8 @@ class ReleaseNotesApp(ctk.CTk):
 
         ctk.set_appearance_mode("light")
         self.title("Release Notes Tool")
-        self.geometry("1000x640")
-        self.minsize(900, 580)
+        self.geometry("1000x700")
+        self.minsize(900, 640)
         self.configure(fg_color=BG)
 
         # ---- Layout: top bar | (sidebar + main) -----------------------------
@@ -624,16 +640,16 @@ class ReleaseNotesApp(ctk.CTk):
     # Top bar
     # ------------------------------------------------------------------
     def _build_topbar(self):
-        bar = ctk.CTkFrame(self, fg_color=NAVY, corner_radius=0, height=60)
+        bar = ctk.CTkFrame(self, fg_color=NAVY, corner_radius=0, height=84)
         bar.grid(row=0, column=0, sticky="ew")
         bar.grid_propagate(False)
         bar.grid_columnconfigure(2, weight=1)
 
-        BrandMark(bar).grid(row=0, column=0, padx=20, pady=11, sticky="w")
+        BrandMark(bar).grid(row=0, column=0, padx=20, pady=10, sticky="w")
 
         # Vertical divider between logo and app name
-        sep = ctk.CTkFrame(bar, fg_color=NAVY_LIGHT, width=1, height=26)
-        sep.grid(row=0, column=1, padx=(4, 14), pady=17)
+        sep = ctk.CTkFrame(bar, fg_color=NAVY_LIGHT, width=1, height=36)
+        sep.grid(row=0, column=1, padx=(4, 14), pady=24)
 
         ctk.CTkLabel(
             bar, text="Release Notes Generator",
@@ -668,11 +684,15 @@ class ReleaseNotesApp(ctk.CTk):
         # Nav items
         self.nav_items: dict[str, NavItem] = {}
         nav_def = [
-            ("home",        "Home",                  "⌂"),
-            ("all_in_one",  "All-in-One",            "▦"),
-            ("for_devnotes","Notes → For_DevNotes",  "✎"),
-            ("release",     "DevNotes → ReleaseNotes","↻"),
+            ("home",         "Home",                  "⌂"),
         ]
+        if HAS_AUTO_GENERATE:
+            nav_def.append(("auto_generate", "Auto-Generate", "⚡"))
+        nav_def.extend([
+            ("all_in_one",   "Manual-Generate",       "▦"),
+            ("for_devnotes", "Notes → For_DevNotes",  "✎"),
+            ("release",      "DevNotes → ReleaseNotes","↻"),
+        ])
         for i, (key, label, icon) in enumerate(nav_def, start=3):
             item = NavItem(side, text=label, icon=icon,
                            command=lambda k=key: self.show_page(k))
@@ -683,7 +703,7 @@ class ReleaseNotesApp(ctk.CTk):
         # Footer: version (row 99 is the spacer that pushes this to the
         # bottom of the sidebar)
         ctk.CTkLabel(
-            side, text="Version 1.1.0", text_color=TEXT_FAINT,
+            side, text="Version 1.2.0", text_color=TEXT_FAINT,
             font=ctk.CTkFont(size=11),
         ).grid(row=100, column=0, padx=20, pady=18, sticky="w")
 
@@ -699,6 +719,8 @@ class ReleaseNotesApp(ctk.CTk):
         self.pages: dict[str, ctk.CTkFrame] = {}
         self.pages["home"]         = self._build_home()
         self.pages["all_in_one"]   = self._build_all_in_one()
+        if HAS_AUTO_GENERATE:
+            self.pages["auto_generate"] = AutoGeneratePage(self.main, app=self)
         self.pages["for_devnotes"] = self._build_for_devnotes()
         self.pages["release"]      = self._build_release()
 
@@ -741,16 +763,22 @@ class ReleaseNotesApp(ctk.CTk):
         grid.grid(row=2, column=0, padx=32, pady=0, sticky="nsew")
         grid.grid_columnconfigure((0, 1), weight=1)
 
-        cards = [
-            ("all_in_one",   "▦", "Run Full Pipeline",
+        cards = []
+        if HAS_AUTO_GENERATE:
+            cards.append(
+                ("auto_generate", "⚡", "Auto-Generate",
+                 "Fetch check-ins from Phabricator\nautomatically — no Notes.txt needed.")
+            )
+        cards.extend([
+            ("all_in_one",   "▦", "Manual-Generate",
              "DevNotes + patch number + check-ins\n→ updated DevNotes and ReleaseNotes."),
             ("for_devnotes", "✎", "Notes → For_DevNotes",
              "Filter raw notes by check-in IDs\nand clean internal headers."),
             ("release",      "↻", "DevNotes → ReleaseNotes",
              "Regenerate ReleaseNotes.txt from\nan existing DevNotes file."),
             ("home",         "✓", "About",
-             "Release notes\nautomation, v1.1.0."),
-        ]
+             "Release notes automation\ntool, v1.2.0."),
+        ])
         for i, (target, icon, title, desc) in enumerate(cards):
             self._home_card(grid, i // 2, i % 2, icon, title, desc, target)
 
@@ -789,12 +817,12 @@ class ReleaseNotesApp(ctk.CTk):
             w.bind("<Button-1>", click)
 
     # ------------------------------------------------------------------
-    # Page: All-in-One
+    # Page: Manual-Generate (formerly All-in-One)
     # ------------------------------------------------------------------
     def _build_all_in_one(self):
         page = self._page(
-            "Run Full Pipeline",
-            "Add a new patch to DevNotes and regenerate ReleaseNotes in one step.",
+            "Manual-Generate",
+            "Add a new patch to DevNotes and regenerate ReleaseNotes from a local Notes.txt file.",
         )
 
         card = Card(page)
