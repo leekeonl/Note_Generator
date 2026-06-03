@@ -37,12 +37,62 @@ import re
 SEPARATOR = "-" * 80
 CHECKIN_ID_RE = re.compile(r'\b\d+\.\d+\b')
 
-# A patch header looks like:    Patch10 6/2/2026
-#                              LabPatch3 5/15/2026
-#                              HomeMade5.1 4/1/2026
+# A patch header is now expected to span TWO lines:
+#
+#     Patch9             ← label only
+#     8/8/2025           ← date on the next line
+#     -------- (sep) --
+#
+# Earlier versions used a single-line "Patch9 8/8/2025" form. We support
+# both, but the two-line form is what the real DevNotes files use.
+
+# Matches a line containing ONLY a patch label (no other characters except
+# leading/trailing whitespace).
+PATCH_LABEL_LINE_RE = re.compile(
+    r'^([A-Za-z]+\d+(?:\.\d+)?[A-Za-z0-9]*)\s*$'
+)
+# Matches a line containing ONLY a date.
+DATE_LINE_RE = re.compile(
+    r'^\s*(\d{1,2}/\d{1,2}/\d{2,4})\s*$'
+)
+# Backward-compat: a single-line "Label date" form, if any older files use it.
 PATCH_HEADER_RE = re.compile(
     r'^([A-Za-z]+\d+(?:\.\d+)?[A-Za-z0-9]*)\s+(\d{1,2}/\d{1,2}/\d{2,4})\s*$'
 )
+
+
+def _find_patch_header_at(lines: list[str], i: int) -> tuple[str, str, int] | None:
+    """
+    If `lines[i]` is the start of a patch header (either two-line or
+    legacy single-line form), return (label, date, header_end_index_exclusive).
+
+    Two-line form: label on line i, date on line i+1.
+        header_end = i + 2
+
+    Legacy single-line form: label and date together on line i.
+        header_end = i + 1
+
+    Returns None if `lines[i]` is not a patch header.
+    """
+    line = lines[i].rstrip()
+
+    # Legacy single-line form first (more specific)
+    m_single = PATCH_HEADER_RE.match(line)
+    if m_single:
+        return m_single.group(1), m_single.group(2), i + 1
+
+    # Two-line form
+    m_label = PATCH_LABEL_LINE_RE.match(line)
+    if not m_label:
+        return None
+    # The label line must be followed by a date line for it to count as a
+    # patch header. Otherwise it's just a label appearing inside body text.
+    if i + 1 >= len(lines):
+        return None
+    m_date = DATE_LINE_RE.match(lines[i + 1].rstrip())
+    if not m_date:
+        return None
+    return m_label.group(1), m_date.group(1), i + 2
 
 
 def list_patch_labels(devnotes_path: str | Path) -> list[str]:
@@ -53,11 +103,17 @@ def list_patch_labels(devnotes_path: str | Path) -> list[str]:
     Example: ["Patch3", "Patch2", "Patch1"]
     """
     text = _read(devnotes_path)
+    lines = text.splitlines()
     labels: list[str] = []
-    for line in text.splitlines():
-        m = PATCH_HEADER_RE.match(line.rstrip())
-        if m:
-            labels.append(m.group(1))
+    i = 0
+    while i < len(lines):
+        hit = _find_patch_header_at(lines, i)
+        if hit:
+            label, _date, next_i = hit
+            labels.append(label)
+            i = next_i
+        else:
+            i += 1
     return labels
 
 
@@ -66,7 +122,7 @@ def extract_patch_block(devnotes_path: str | Path, label: str) -> str | None:
     Return the full text of the patch block with the given label, or None
     if not found.
 
-    The returned text includes the patch header line, separator, all
+    The returned text includes the patch header line(s), separator, all
     check-in blocks, and the trailing separator. It does NOT include
     leading or trailing blank lines.
     """
@@ -76,28 +132,31 @@ def extract_patch_block(devnotes_path: str | Path, label: str) -> str | None:
     start_idx: int | None = None
     end_idx: int | None = None
 
-    for i, line in enumerate(lines):
-        m = PATCH_HEADER_RE.match(line.rstrip())
-        if m:
-            if start_idx is None and m.group(1) == label:
+    i = 0
+    while i < len(lines):
+        hit = _find_patch_header_at(lines, i)
+        if hit:
+            hit_label, _date, next_i = hit
+            if start_idx is None and hit_label == label:
                 start_idx = i
+                i = next_i
                 continue
-            # We found the next patch header — that marks the end of our block
             if start_idx is not None:
+                # Found the next patch header — our block ends here
                 end_idx = i
                 break
+            i = next_i
+        else:
+            i += 1
 
     if start_idx is None:
         return None
-
     if end_idx is None:
         end_idx = len(lines)
 
-    # Trim trailing blank lines from the slice
     block_lines = lines[start_idx:end_idx]
     while block_lines and not block_lines[-1].strip():
         block_lines.pop()
-
     return "\n".join(block_lines)
 
 
@@ -131,19 +190,24 @@ def remove_patch_block(devnotes_path: str | Path, label: str) -> str:
     start_idx: int | None = None
     end_idx: int | None = None
 
-    for i, line in enumerate(lines):
-        m = PATCH_HEADER_RE.match(line.rstrip())
-        if m:
-            if start_idx is None and m.group(1) == label:
+    i = 0
+    while i < len(lines):
+        hit = _find_patch_header_at(lines, i)
+        if hit:
+            hit_label, _date, next_i = hit
+            if start_idx is None and hit_label == label:
                 start_idx = i
+                i = next_i
                 continue
             if start_idx is not None:
                 end_idx = i
                 break
+            i = next_i
+        else:
+            i += 1
 
     if start_idx is None:
         return text
-
     if end_idx is None:
         end_idx = len(lines)
 

@@ -32,6 +32,7 @@ from devnotes_parser import (
     SEPARATOR, PATCH_HEADER_RE, CHECKIN_ID_RE,
     extract_patch_block, parse_patch_checkins, remove_patch_block,
     list_patch_labels,
+    _find_patch_header_at,
 )
 
 
@@ -107,11 +108,11 @@ def _split_patch_into_checkin_blocks(patch_block_text: str) -> tuple[str, dict[s
     Split an existing patch block (with header) into:
         (header_text, {checkin_id: block_text})
 
-    header_text is the patch label/date line, NOT including the first
-    separator (which we'll re-emit when serializing).
+    header_text is the patch label/date line(s), NOT including the first
+    separator (which we'll re-emit when serializing). Works for both the
+    two-line "Patch9\n8/8/2025" form and the legacy "Patch9 8/8/2025" form.
     """
     lines = patch_block_text.splitlines()
-    # The header is everything up to the first SEPARATOR
     header_lines: list[str] = []
     body_start = 0
     for i, line in enumerate(lines):
@@ -208,9 +209,10 @@ def build_merge_preview(
     # 4. Sort final IDs descending by check-in number
     final_ids = sorted(merged_blocks.keys(), key=_checkin_sort_key, reverse=True)
 
-    # 5. Update the header to today's date (keep label as-is)
+    # 5. Update the header to today's date (keep label as-is). Use the
+    # two-line form ("Patch9\n8/8/2025") to match the rest of the file.
     today_str = _format_today()
-    new_header = f"{patch_label} {today_str}"
+    new_header = f"{patch_label}\n{today_str}"
 
     rebuilt_block = _serialize_patch_block(new_header, merged_blocks, final_ids)
 
@@ -281,27 +283,25 @@ def _splice_patch_back(
         while insert_at < len(out_lines) and not out_lines[insert_at].strip():
             insert_at += 1
     else:
-        # Insert immediately before the patch that USED TO come before ours
-        # (since we want the most recent at top, and we're descending).
-        # Wait — patches in the file are listed newest-first (top of file).
-        # If label_before is the one that was ABOVE ours, we want to insert
-        # right after its block.
-        # Find where label_before's block ends in devnotes_without_block.
+        # Insert immediately after `label_before`'s block.
+        # Walk the lines using the two-line-aware header detector.
         insert_at = len(out_lines)
         in_target_block = False
-        for i, line in enumerate(out_lines):
-            m = PATCH_HEADER_RE.match(line.rstrip())
-            if m:
-                if m.group(1) == label_before:
+        i = 0
+        while i < len(out_lines):
+            hit = _find_patch_header_at(out_lines, i)
+            if hit:
+                hit_label, _date, next_i = hit
+                if hit_label == label_before:
                     in_target_block = True
+                    i = next_i
                     continue
                 if in_target_block:
                     insert_at = i
                     break
-        # If label_before was the last patch in the (post-removal) file,
-        # insert at the end.
-        if in_target_block and insert_at == len(out_lines):
-            insert_at = len(out_lines)
+                i = next_i
+            else:
+                i += 1
 
     # Build the spliced result with appropriate spacing around our block
     before = out_lines[:insert_at]
