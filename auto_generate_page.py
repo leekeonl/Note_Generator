@@ -440,10 +440,30 @@ class AutoGeneratePage(ctk.CTkFrame):
                   f"{len(merged.matched_queries)} of {len(queries)} matched."),
             text_color=self._GREEN)
 
+        # Let the user pick which check-ins to actually include. Always
+        # shown — even for a single check-in, as a confirmation step.
+        sel_dialog = CheckinSelectionDialog(
+            self.app, merged.text,
+            colors=(self._GREEN, self._GREEN_HOVER, self._TEXT, self._TEXT_MUTED, self._BORDER),
+        )
+        filtered_text = sel_dialog.show()
+        if filtered_text is None:
+            # User cancelled the selection
+            self.status_label.configure(text="Cancelled.", text_color=self._TEXT_MUTED)
+            return
+        if not filtered_text.strip():
+            # User unchecked everything
+            messagebox.showwarning(
+                "No check-ins selected",
+                "You unchecked every check-in. Nothing to do."
+            )
+            self.status_label.configure(text="No check-ins selected.", text_color="#a16207")
+            return
+
         if mode == "new":
-            self._handle_new_patch(devnotes, patch_label, queries, merged.text)
+            self._handle_new_patch(devnotes, patch_label, queries, filtered_text)
         else:
-            self._handle_merge(devnotes, patch_label, merged.text)
+            self._handle_merge(devnotes, patch_label, filtered_text)
 
     # ------------------------------------------------------------------
     # New patch (existing flow)
@@ -573,6 +593,11 @@ class _MergePreviewAdapter:
         self.requested_checkin_ids = list(mp.final_checkin_ids)
         self.included_checkin_ids  = list(mp.final_checkin_ids)
         self.missing_checkin_ids   = []
+        # PR→checkins map is meaningful only in the new-patch flow (where we
+        # resolve PRs against a fresh Notes.txt). In merge mode the new
+        # check-ins came pre-resolved from Phabricator, so we hand the
+        # PreviewDialog an empty dict — it just hides that section.
+        self.pr_to_checkins = {}
 
 
 class ConflictResolutionDialog(ctk.CTkToplevel):
@@ -674,5 +699,209 @@ class ConflictResolutionDialog(ctk.CTkToplevel):
         self.destroy()
 
     def show(self) -> dict[str, bool] | None:
+        self.wait_window()
+        return self._result
+
+
+# ======================================================================
+# Check-in selection dialog
+# ======================================================================
+
+# Re-use the same separator and ID pattern as the rest of the pipeline.
+_SEPARATOR = "-" * 80
+_CHECKIN_ID_RE = re.compile(r'\b\d+\.\d+\b')
+
+
+def _split_notes_into_blocks(notes_text: str) -> list[tuple[str, str, str]]:
+    """
+    Parse Notes.txt-style text into a list of (checkin_id, first_line, block_text).
+
+    `block_text` is the block content WITHOUT the surrounding separators
+    (so we can stitch a fresh selection back together without double
+    separators). `first_line` is the first non-empty line of the body
+    after "Checkin ID:" — used as a one-line summary in the dialog.
+
+    Blocks without a recognizable check-in ID are skipped (they're usually
+    just trailing whitespace or stray separators from Phab joining).
+    """
+    blocks: list[tuple[str, str, str]] = []
+    current_lines: list[str] = []
+    current_id: str | None = None
+    summary: str = ""
+
+    def _flush():
+        nonlocal current_lines, current_id, summary
+        if current_id and current_lines:
+            block_text = "\n".join(current_lines).strip("\n")
+            blocks.append((current_id, summary or "(no description)", block_text))
+        current_lines = []
+        current_id = None
+        summary = ""
+
+    for line in notes_text.splitlines():
+        if line.rstrip() == _SEPARATOR:
+            _flush()
+            continue
+        current_lines.append(line)
+        stripped = line.strip()
+        if current_id is None and stripped.startswith("Checkin ID:"):
+            m = _CHECKIN_ID_RE.search(stripped)
+            if m:
+                current_id = m.group()
+        elif current_id and not summary:
+            # First descriptive line after "Checkin ID:" / "PR Number(s):" /
+            # "Comments:" — typically the [Issue Description] body.
+            if stripped and not any(
+                stripped.startswith(skip)
+                for skip in ("Checkin ID:", "PR Number(s):", "Comments:", "[")
+            ):
+                summary = stripped[:80]
+    _flush()
+    return blocks
+
+
+def _filter_text_to_selected(notes_text: str, selected_ids: set[str]) -> str:
+    """
+    Re-emit Notes.txt-style text containing only the blocks for `selected_ids`,
+    preserving the original order they appeared in.
+    """
+    blocks = _split_notes_into_blocks(notes_text)
+    out: list[str] = []
+    for cid, _summary, block in blocks:
+        if cid in selected_ids:
+            out.append(_SEPARATOR)
+            out.append(block)
+    if out:
+        out.append(_SEPARATOR)
+    return "\n".join(out) + ("\n" if out else "")
+
+
+class CheckinSelectionDialog(ctk.CTkToplevel):
+    """
+    Modal dialog: lists every check-in returned by Phabricator with a
+    checkbox each. User can pick any subset. show() returns the filtered
+    Notes.txt-style text, or None if cancelled.
+
+    Always shown, even for a single check-in — keeps the user in control
+    even when "auto" feels a little too automatic.
+    """
+    def __init__(self, parent, notes_text: str, colors):
+        super().__init__(parent)
+        green, green_hover, text, text_muted, border = colors
+        self._notes_text = notes_text
+        self._blocks = _split_notes_into_blocks(notes_text)
+        self._result: str | None = None
+        self._vars: dict[str, ctk.BooleanVar] = {}
+
+        self.title(f"Select check-ins ({len(self._blocks)} fetched)")
+        self.geometry("560x520")
+        self.transient(parent)
+        self.grab_set()
+        self.configure(fg_color="#f4f5f7")
+
+        # Header
+        ctk.CTkLabel(
+            self,
+            text=f"Phabricator returned {len(self._blocks)} check-in(s)",
+            text_color=text, font=ctk.CTkFont(size=15, weight="bold"),
+        ).pack(padx=20, pady=(20, 4), anchor="w")
+        ctk.CTkLabel(
+            self,
+            text=("Pick which ones to include in the patch. Default: all "
+                  "checked. Uncheck any you don't want."),
+            text_color=text_muted, font=ctk.CTkFont(size=12),
+            wraplength=520, justify="left", anchor="w",
+        ).pack(padx=20, pady=(0, 12), anchor="w")
+
+        # Scrollable list of check-ins with checkboxes
+        scroller = ctk.CTkScrollableFrame(
+            self, fg_color="white",
+            border_width=1, border_color=border, corner_radius=8,
+        )
+        scroller.pack(padx=20, pady=(0, 12), fill="both", expand=True)
+
+        if not self._blocks:
+            ctk.CTkLabel(
+                scroller,
+                text=("No parseable check-ins in the fetched data. This "
+                      "usually means the result was empty or in an unexpected "
+                      "format."),
+                text_color=text_muted, font=ctk.CTkFont(size=12),
+                wraplength=460, justify="left",
+            ).pack(padx=14, pady=14)
+        else:
+            for cid, summary, _block in self._blocks:
+                row = ctk.CTkFrame(scroller, fg_color="transparent")
+                row.pack(fill="x", padx=10, pady=4)
+
+                var = ctk.BooleanVar(value=True)
+                self._vars[cid] = var
+
+                ctk.CTkCheckBox(
+                    row, text="", variable=var,
+                    fg_color=green, hover_color=green_hover,
+                    width=24,
+                ).pack(side="left", padx=(0, 8))
+
+                # Two-line label: check-in ID (bold) + first-line summary
+                label_box = ctk.CTkFrame(row, fg_color="transparent")
+                label_box.pack(side="left", fill="x", expand=True)
+                ctk.CTkLabel(
+                    label_box, text=f"Check-in {cid}",
+                    text_color=text, font=ctk.CTkFont(size=13, weight="bold"),
+                    anchor="w",
+                ).pack(fill="x", anchor="w")
+                ctk.CTkLabel(
+                    label_box, text=summary,
+                    text_color=text_muted, font=ctk.CTkFont(size=11),
+                    anchor="w", justify="left", wraplength=440,
+                ).pack(fill="x", anchor="w")
+
+        # Bulk action buttons
+        bulk = ctk.CTkFrame(self, fg_color="transparent")
+        bulk.pack(padx=20, pady=(0, 8), fill="x")
+        ctk.CTkButton(
+            bulk, text="Select all", height=28,
+            fg_color="white", text_color=text,
+            border_width=1, border_color=border, hover_color="#f0f0f0",
+            command=lambda: self._set_all(True),
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            bulk, text="Select none", height=28,
+            fg_color="white", text_color=text,
+            border_width=1, border_color=border, hover_color="#f0f0f0",
+            command=lambda: self._set_all(False),
+        ).pack(side="left")
+
+        # Confirm / Cancel
+        actions = ctk.CTkFrame(self, fg_color="transparent")
+        actions.pack(padx=20, pady=(0, 16), fill="x")
+        ctk.CTkButton(
+            actions, text="Cancel", height=36,
+            fg_color="white", text_color=text,
+            border_width=1, border_color=border, hover_color="#f0f0f0",
+            command=self._on_cancel,
+        ).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(
+            actions, text="Continue", height=36,
+            fg_color=green, hover_color=green_hover, text_color="white",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._on_continue,
+        ).pack(side="right")
+
+    def _set_all(self, value: bool):
+        for v in self._vars.values():
+            v.set(value)
+
+    def _on_continue(self):
+        selected = {cid for cid, var in self._vars.items() if var.get()}
+        self._result = _filter_text_to_selected(self._notes_text, selected)
+        self.destroy()
+
+    def _on_cancel(self):
+        self._result = None
+        self.destroy()
+
+    def show(self) -> str | None:
         self.wait_window()
         return self._result

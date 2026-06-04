@@ -147,6 +147,50 @@ def _checkin_sort_key(cid: str) -> tuple[int, int]:
         return (-1, -1)
 
 
+def _normalize_new_notes(new_notes_text: str) -> str:
+    """
+    Apply the same normalization the new-patch pipeline applies, so the
+    merge flow gets identical output (Auto-Merge handled, internal headers
+    stripped, inline section headers split, etc.).
+
+    notes_to_for_devnotes.build_for_devnotes_text is file-based, so we
+    write the inputs to temp files and read the output back. Slightly
+    wasteful but it guarantees both flows go through the exact same code.
+    """
+    import tempfile
+    import os
+    from notes_to_for_devnotes import build_for_devnotes_text, CHECKIN_ID_RE
+
+    # Extract every check-in ID present in the new notes — those are the
+    # ones we want to keep when normalizing. Otherwise the filter step
+    # would drop everything.
+    checkin_ids = sorted(set(CHECKIN_ID_RE.findall(new_notes_text)))
+    if not checkin_ids:
+        return new_notes_text  # nothing to normalize
+
+    notes_tmp = None
+    checkinid_tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".txt", delete=False,
+            prefix="merge_notes_") as tmp:
+            tmp.write(new_notes_text)
+            notes_tmp = tmp.name
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".txt", delete=False,
+            prefix="merge_checkinid_") as tmp:
+            tmp.write("\n".join(checkin_ids))
+            checkinid_tmp = tmp.name
+
+        result = build_for_devnotes_text(checkinid_tmp, notes_tmp)
+        return result.text
+    finally:
+        for p in (notes_tmp, checkinid_tmp):
+            if p:
+                try: os.unlink(p)
+                except OSError: pass
+
+
 def build_merge_preview(
     devnotes_file: str,
     releasenotes_file: str,
@@ -180,11 +224,20 @@ def build_merge_preview(
     header_text, existing_blocks = _split_patch_into_checkin_blocks(existing_block)
     existing_ids = list(existing_blocks.keys())
 
-    # 2. Parse new check-in blocks
-    new_blocks = _split_into_checkin_blocks(new_notes_text)
+    # 2. Normalize the newly-fetched notes through the same pipeline the
+    # new-patch flow uses. This handles:
+    #   - Auto-Merge Wizard app-list replacement (old apps → new apps)
+    #   - Stripping internal-only headers (Developer:, Timestamp:, etc.)
+    #   - Inline section header normalization
+    # Without this step the merge preview would show raw Phabricator output
+    # with old app versions still listed above the Auto-Merge block.
+    normalized_new_notes = _normalize_new_notes(new_notes_text)
+
+    # 3. Parse new check-in blocks
+    new_blocks = _split_into_checkin_blocks(normalized_new_notes)
     new_ids = list(new_blocks.keys())
 
-    # 3. Detect conflicts and decide per-id which version to keep
+    # 4. Detect conflicts and decide per-id which version to keep
     conflicts = detect_merge_conflicts(existing_ids, new_ids)
     merged_blocks: dict[str, str] = {}
 
