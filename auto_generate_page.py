@@ -710,33 +710,42 @@ class ConflictResolutionDialog(ctk.CTkToplevel):
 # Re-use the same separator and ID pattern as the rest of the pipeline.
 _SEPARATOR = "-" * 80
 _CHECKIN_ID_RE = re.compile(r'\b\d+\.\d+\b')
+_PR_RE = re.compile(r'\bPR-\d+(?:-\d+)?\b', re.IGNORECASE)
 
 
-def _split_notes_into_blocks(notes_text: str) -> list[tuple[str, str, str]]:
+def _split_notes_into_blocks(notes_text: str) -> list[tuple[str, str, list[str], str]]:
     """
-    Parse Notes.txt-style text into a list of (checkin_id, first_line, block_text).
+    Parse Notes.txt-style text into a list of
+        (checkin_id, summary, pr_numbers, block_text).
 
-    `block_text` is the block content WITHOUT the surrounding separators
-    (so we can stitch a fresh selection back together without double
-    separators). `first_line` is the first non-empty line of the body
-    after "Checkin ID:" — used as a one-line summary in the dialog.
+    Returned fields:
+        checkin_id   — e.g. "0.2626"
+        summary      — one-line description (first body line)
+        pr_numbers   — list of PR numbers found in "PR Number(s):" line
+        block_text   — the block content WITHOUT surrounding separators
 
-    Blocks without a recognizable check-in ID are skipped (they're usually
-    just trailing whitespace or stray separators from Phab joining).
+    Blocks without a recognizable check-in ID are skipped.
     """
-    blocks: list[tuple[str, str, str]] = []
+    blocks: list[tuple[str, str, list[str], str]] = []
     current_lines: list[str] = []
     current_id: str | None = None
     summary: str = ""
+    pr_numbers: list[str] = []
 
     def _flush():
-        nonlocal current_lines, current_id, summary
+        nonlocal current_lines, current_id, summary, pr_numbers
         if current_id and current_lines:
             block_text = "\n".join(current_lines).strip("\n")
-            blocks.append((current_id, summary or "(no description)", block_text))
+            blocks.append((
+                current_id,
+                summary or "(no description)",
+                pr_numbers[:],
+                block_text,
+            ))
         current_lines = []
         current_id = None
         summary = ""
+        pr_numbers = []
 
     for line in notes_text.splitlines():
         if line.rstrip() == _SEPARATOR:
@@ -748,6 +757,16 @@ def _split_notes_into_blocks(notes_text: str) -> list[tuple[str, str, str]]:
             m = _CHECKIN_ID_RE.search(stripped)
             if m:
                 current_id = m.group()
+        elif current_id and stripped.startswith("PR Number(s):"):
+            # Capture every PR number on this line, preserving order.
+            seen_in_line: set[str] = set()
+            for prm in _PR_RE.finditer(stripped):
+                pr = prm.group()
+                # Canonicalize prefix to "PR-"
+                pr = "PR-" + pr.split("-", 1)[1]
+                if pr not in seen_in_line:
+                    seen_in_line.add(pr)
+                    pr_numbers.append(pr)
         elif current_id and not summary:
             # First descriptive line after "Checkin ID:" / "PR Number(s):" /
             # "Comments:" — typically the [Issue Description] body.
@@ -767,7 +786,7 @@ def _filter_text_to_selected(notes_text: str, selected_ids: set[str]) -> str:
     """
     blocks = _split_notes_into_blocks(notes_text)
     out: list[str] = []
-    for cid, _summary, block in blocks:
+    for cid, _summary, _prs, block in blocks:
         if cid in selected_ids:
             out.append(_SEPARATOR)
             out.append(block)
@@ -830,7 +849,7 @@ class CheckinSelectionDialog(ctk.CTkToplevel):
                 wraplength=460, justify="left",
             ).pack(padx=14, pady=14)
         else:
-            for cid, summary, _block in self._blocks:
+            for cid, summary, prs, _block in self._blocks:
                 row = ctk.CTkFrame(scroller, fg_color="transparent")
                 row.pack(fill="x", padx=10, pady=4)
 
@@ -843,14 +862,24 @@ class CheckinSelectionDialog(ctk.CTkToplevel):
                     width=24,
                 ).pack(side="left", padx=(0, 8))
 
-                # Two-line label: check-in ID (bold) + first-line summary
+                # Stacked label: "Check-in 0.2626" + optional PR badge line
+                # + one-line summary. Layout is consistent whether or not
+                # PRs are present (the PR line just collapses out).
                 label_box = ctk.CTkFrame(row, fg_color="transparent")
                 label_box.pack(side="left", fill="x", expand=True)
+
+                # Top line: Check-in ID, then PR numbers if present
+                if prs:
+                    pr_str = ", ".join(prs)
+                    top_text = f"Check-in {cid}    ·    {pr_str}"
+                else:
+                    top_text = f"Check-in {cid}"
                 ctk.CTkLabel(
-                    label_box, text=f"Check-in {cid}",
+                    label_box, text=top_text,
                     text_color=text, font=ctk.CTkFont(size=13, weight="bold"),
                     anchor="w",
                 ).pack(fill="x", anchor="w")
+
                 ctk.CTkLabel(
                     label_box, text=summary,
                     text_color=text_muted, font=ctk.CTkFont(size=11),
