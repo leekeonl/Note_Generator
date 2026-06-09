@@ -39,7 +39,12 @@ from devnotes_parser import list_patch_labels
 # PhabSource imported lazily inside _build_sources so this file loads even
 # when requests is missing.
 
-FALLBACK_BRANCH = "Development"
+# The repository's mainline branch in Phabricator. Although the team
+# refers to this as the "Development" line conceptually, the actual git
+# branch name in the Phabricator mirror is "master" — that's the name the
+# diffusion.commit.search API expects in constraints[ancestorsOf].
+# Passing "Development" yields a git "bad revision" error (no such ref).
+FALLBACK_BRANCH = "master"
 
 PR_RE = re.compile(r'\bPR-\d+(?:-\d+)?\b', re.IGNORECASE)
 CHECKIN_ID_RE = re.compile(r'\b\d+\.\d+\b')
@@ -156,8 +161,8 @@ class AutoGeneratePage(ctk.CTkFrame):
         ctk.CTkLabel(
             card2,
             text=(f"Auto-detected from the DevNotes 'Base Version:' line. "
-                  f"Edit to override. {FALLBACK_BRANCH} is always tried as "
-                  f"the ultimate fallback."),
+                  f"Edit to override. The mainline branch ('{FALLBACK_BRANCH}') "
+                  f"is always tried as the ultimate fallback."),
             text_color=TEXT_MUTED, font=ctk.CTkFont(size=12),
             wraplength=620, justify="left", anchor="w",
         ).grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 10), columnspan=2)
