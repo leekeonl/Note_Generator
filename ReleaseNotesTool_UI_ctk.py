@@ -703,7 +703,7 @@ class ReleaseNotesApp(ctk.CTk):
         # Footer: version (row 99 is the spacer that pushes this to the
         # bottom of the sidebar)
         ctk.CTkLabel(
-            side, text="Version 1.2.0", text_color=TEXT_FAINT,
+            side, text="Version 1.3.0", text_color=TEXT_FAINT,
             font=ctk.CTkFont(size=11),
         ).grid(row=100, column=0, padx=20, pady=18, sticky="w")
 
@@ -777,7 +777,7 @@ class ReleaseNotesApp(ctk.CTk):
             ("release",      "↻", "DevNotes → ReleaseNotes",
              "Regenerate ReleaseNotes.txt from\nan existing DevNotes file."),
             ("home",         "✓", "About",
-             "Release notes automation\ntool, v1.2.0."),
+             "Release notes automation\ntool, v1.3.0."),
         ])
         for i, (target, icon, title, desc) in enumerate(cards):
             self._home_card(grid, i // 2, i % 2, icon, title, desc, target)
