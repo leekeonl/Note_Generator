@@ -172,18 +172,30 @@ def build_preview(
     patch_number: str,
     checkinid_file: str,
     notes_file: str,
+    base_version: str | None = None,
 ) -> PipelinePreview:
     """
     Compute everything the pipeline would do, without touching the user's
     filesystem (temp files used internally are cleaned up). Pass the result
     to commit_preview() to apply the changes.
 
+    First-time creation:
+        If `devnotes_file` does not exist yet, it is treated as a brand-new
+        DevNotes — the original contents are empty. When `base_version` is
+        provided, a "Base Version: <base_version>" header is seeded at the
+        top so the new patch block is inserted just below it (and future
+        branch auto-detect works). The file's parent folder must exist.
+
     Raises:
         FileNotFoundError, ValueError - same conditions as run_full_pipeline().
     """
     devnotes_path = Path(devnotes_file)
-    if not devnotes_path.exists():
-        raise FileNotFoundError(f"DevNotes file not found: {devnotes_path}")
+    creating_new = not devnotes_path.exists()
+
+    if creating_new and not devnotes_path.parent.exists():
+        raise FileNotFoundError(
+            f"Folder does not exist: {devnotes_path.parent}"
+        )
 
     if not patch_number or not patch_number.strip():
         raise ValueError("Patch number is required (e.g. 'Patch10').")
@@ -199,7 +211,17 @@ def build_preview(
     patch_date = _format_today()
     new_patch_block = _build_new_patch_block(patch_label, fd_result.text)
 
-    original_devnotes = devnotes_path.read_text(encoding="utf-8", errors="ignore")
+    if creating_new:
+        # Brand-new DevNotes. Seed an optional Base Version header so the
+        # patch lands just below it and downstream generation / future
+        # auto-detect have something to read.
+        if base_version and base_version.strip():
+            original_devnotes = f"Base Version: {base_version.strip()}\n"
+        else:
+            original_devnotes = ""
+    else:
+        original_devnotes = devnotes_path.read_text(encoding="utf-8", errors="ignore")
+
     predicted_devnotes = _compose_updated_devnotes(original_devnotes, new_patch_block)
     predicted_releasenotes = _predict_releasenotes(predicted_devnotes)
 
