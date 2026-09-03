@@ -1,13 +1,11 @@
 """
 ReleaseNotesTool_UI_ctk.py
 
-Modern UI for the Release Notes Tool:
+Modern UI for the Release Notes Tool in the Lam Research visual style:
   - Dark navy sidebar (#0b1426)
   - Green accent (#1d9e75) for active state and primary actions
   - White card surfaces in the main panel
-  - Sidebar navigation:
-      Home / Auto-Generate / Manual-Generate /
-      Notes → For_DevNotes / DevNotes → ReleaseNotes
+  - Sidebar navigation (Home / All-in-One / Notes → For_DevNotes / DevNotes → ReleaseNotes)
 
 Requires:  pip install customtkinter
 Reuses backend modules:
@@ -18,8 +16,10 @@ Reuses backend modules:
 
 from pathlib import Path
 from tkinter import filedialog, messagebox
+import sys
 
 import customtkinter as ctk
+from PIL import Image
 
 from full_pipeline import build_preview, commit_preview, PipelinePreview
 from notes_to_for_devnotes import generate_for_devnotes
@@ -34,7 +34,33 @@ except ImportError as e:
 
 
 # =============================================================================
-# Color palette
+# App version — single source of truth.
+# Bump this ONE line to change the version everywhere it's shown in the UI
+# (sidebar footer + About card).
+# =============================================================================
+APP_VERSION = "1.5.0"
+
+# Monospace font family for all fixed-width previews (DevNotes/ReleaseNotes
+# body, check-in IDs, PR resolution). "Courier New" is a TrueType font that
+# ships with Windows, so it renders identically across machines — unlike the
+# bare "Courier" alias, which some Tk builds silently substitute with a
+# different fallback face.
+MONO_FONT = "Consolas"
+
+
+def _asset_path(filename: str) -> Path:
+    """
+    Locate an asset file whether running from source or a PyInstaller bundle.
+
+    PyInstaller --onefile extracts bundled data into a temp folder pointed at
+    by sys._MEIPASS. From source, assets/ sits next to this file.
+    """
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return base / "assets" / filename
+
+
+# =============================================================================
+# Color palette (Lam Research-inspired)
 # =============================================================================
 NAVY        = "#0b1426"   # sidebar / top bar background
 NAVY_HOVER  = "#142036"   # sidebar nav hover
@@ -53,52 +79,104 @@ TEXT_FAINT  = "#8895ab"   # tertiary text
 # =============================================================================
 # Reusable widgets
 # =============================================================================
-class BrandMark(ctk.CTkFrame):
+class LamLogo(ctk.CTkFrame):
     """
-    A small canvas-drawn brand mark for the top bar — a triangular logo
-    with a notch, rendered using tkinter's Canvas. No external image
-    asset required.
+    Lam Research logo (image-based) with the dark JPG background removed.
 
-    The shape is deliberately abstract so the app reads as a generic
-    "release notes tool" rather than being tied to any specific brand.
-    Customize freely if you fork this project.
+    The source asset is a JPG of the logo on a dark navy background. We load
+    it, detect the background color (sampled from the corner), and convert
+    those pixels to transparent so the logo sits cleanly on any background
+    color — no visible rectangle even if the parent's color is slightly
+    different from the JPG's.
+
+    If the image file is missing, the widget falls back to a plain text
+    wordmark.
     """
-    SIZE = 44  # canvas square size in pixels
+    LOGO_HEIGHT = 64   # display height in pixels; width scales to preserve aspect ratio
 
     def __init__(self, master, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
-        canvas = ctk.CTkCanvas(
-            self, width=self.SIZE, height=self.SIZE,
-            highlightthickness=0, bg=NAVY,
-        )
-        canvas.grid(row=0, column=0, sticky="w")
-        self._draw(canvas)
 
-        # Wordmark next to the canvas
-        ctk.CTkLabel(
-            self, text="Release Notes Tool",
-            text_color="white",
-            font=ctk.CTkFont(size=16, weight="bold"),
-        ).grid(row=0, column=1, padx=(12, 0), sticky="w")
+        logo_path = _asset_path("lam_logo.jpg")
+        try:
+            pil_image = self._load_logo_with_transparent_bg(logo_path)
 
-    def _draw(self, canvas):
-        s = self.SIZE
-        pad = 6
-        # Outer triangle pointing up
-        canvas.create_polygon(
-            s // 2, pad,                 # top
-            s - pad, s - pad,            # bottom-right
-            pad, s - pad,                # bottom-left
-            fill="white", outline="",
-        )
-        # V-notch cut from the bottom (drawn in NAVY to match background)
-        notch = 9
-        canvas.create_polygon(
-            s // 2, s - pad - notch,
-            s // 2 + notch, s - pad,
-            s // 2 - notch, s - pad,
-            fill=NAVY, outline="",
-        )
+            # Scale width to preserve aspect ratio at the desired display height
+            aspect = pil_image.size[0] / pil_image.size[1]
+            display_size = (int(self.LOGO_HEIGHT * aspect), self.LOGO_HEIGHT)
+
+            self.logo_image = ctk.CTkImage(
+                light_image=pil_image,
+                dark_image=pil_image,
+                size=display_size,
+            )
+            ctk.CTkLabel(
+                self, image=self.logo_image, text="",
+            ).grid(row=0, column=0, sticky="w")
+        except (FileNotFoundError, OSError) as e:
+            # Asset missing — fall back to a plain text wordmark so the
+            # app still works. Colors tuned for the dark navy top bar.
+            print(f"Warning: could not load logo from {logo_path}: {e}")
+            ctk.CTkLabel(
+                self, text="Lam", text_color="white",
+                font=ctk.CTkFont(size=26, weight="bold"),
+            ).grid(row=0, column=0, sticky="w")
+            ctk.CTkLabel(
+                self, text="RESEARCH", text_color="#c8d0dd",
+                font=ctk.CTkFont(size=14, weight="normal"),
+            ).grid(row=0, column=1, padx=(8, 0), sticky="w")
+
+    @staticmethod
+    def _load_logo_with_transparent_bg(path: Path, tolerance: int = 30) -> Image.Image:
+        """
+        Load the logo JPG, make its dark background transparent, and crop the
+        transparent padding so the logo fills the returned image.
+
+        The source asset has substantial empty padding on all sides (roughly
+        30% top/bottom, 10% left/right). Without cropping, this padding ends
+        up as transparent "empty space" around the logo in the top bar.
+
+        Steps:
+            1. Convert to RGBA and sample the background color from a corner.
+            2. Make any pixel close to the background color fully transparent.
+            3. Compute the bounding box of the remaining (logo) pixels.
+            4. Crop to that bounding box.
+
+        Returns an RGBA PIL Image with no transparent padding around the logo.
+        """
+        img = Image.open(path).convert("RGBA")
+        pixels = img.load()
+        if pixels is None:
+            return img
+
+        # Sample the background color from a corner pixel
+        bg_r, bg_g, bg_b, _ = pixels[0, 0]
+
+        width, height = img.size
+        min_x, min_y, max_x, max_y = width, height, 0, 0
+
+        for y in range(height):
+            for x in range(width):
+                r, g, b, _ = pixels[x, y]
+                is_background = (abs(r - bg_r) <= tolerance and
+                                 abs(g - bg_g) <= tolerance and
+                                 abs(b - bg_b) <= tolerance)
+                if is_background:
+                    pixels[x, y] = (0, 0, 0, 0)
+                else:
+                    # Track the bounding box of non-background (logo) pixels
+                    if x < min_x: min_x = x
+                    if y < min_y: min_y = y
+                    if x > max_x: max_x = x
+                    if y > max_y: max_y = y
+
+        # Crop to the logo's actual bounds (add 1 to max coords because crop
+        # is exclusive on the right/bottom edge). Fall back to the original
+        # image if no logo pixels were found (e.g. all-background image).
+        if max_x >= min_x and max_y >= min_y:
+            img = img.crop((min_x, min_y, max_x + 1, max_y + 1))
+
+        return img
 
 
 class NavItem(ctk.CTkButton):
@@ -451,7 +529,7 @@ class PreviewDialog(ctk.CTkToplevel):
                 warn,
                 text=", ".join(self.preview.missing_checkin_ids),
                 text_color="#78350f",
-                font=ctk.CTkFont(size=12, family="Courier"),
+                font=ctk.CTkFont(size=12, family=MONO_FONT),
                 anchor="w", justify="left", wraplength=820,
             ).grid(row=1, column=0, padx=14, pady=(0, 10), sticky="w")
             row_idx += 1
@@ -473,7 +551,7 @@ class PreviewDialog(ctk.CTkToplevel):
                     pr_info,
                     text=f"  {pr}  →  {', '.join(checkins)}",
                     text_color="#0b1426",
-                    font=ctk.CTkFont(size=12, family="Courier"),
+                    font=ctk.CTkFont(size=12, family=MONO_FONT),
                     anchor="w", justify="left",
                 ).grid(row=sub_i, column=0, padx=14,
                        pady=(0, 10 if sub_i == len(self.preview.pr_to_checkins) else 0),
@@ -517,7 +595,7 @@ class PreviewDialog(ctk.CTkToplevel):
                     text = cid
                 ctk.CTkLabel(
                     row, text=text, text_color=TEXT,
-                    font=ctk.CTkFont(size=12, family="Courier"), anchor="w",
+                    font=ctk.CTkFont(size=12, family=MONO_FONT), anchor="w",
                 ).grid(row=0, column=1, padx=(0, 10), pady=6, sticky="w")
                 row_idx += 1
 
@@ -538,7 +616,7 @@ class PreviewDialog(ctk.CTkToplevel):
             bg="#fafbfc", fg=TEXT,
             insertbackground=TEXT,
             relief="flat", borderwidth=0,
-            font=("Courier", 11),
+            font=(MONO_FONT, 11),
             padx=12, pady=10,
         )
         text.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
@@ -645,7 +723,7 @@ class ReleaseNotesApp(ctk.CTk):
         bar.grid_propagate(False)
         bar.grid_columnconfigure(2, weight=1)
 
-        BrandMark(bar).grid(row=0, column=0, padx=20, pady=10, sticky="w")
+        LamLogo(bar).grid(row=0, column=0, padx=20, pady=10, sticky="w")
 
         # Vertical divider between logo and app name
         sep = ctk.CTkFrame(bar, fg_color=NAVY_LIGHT, width=1, height=36)
@@ -703,7 +781,7 @@ class ReleaseNotesApp(ctk.CTk):
         # Footer: version (row 99 is the spacer that pushes this to the
         # bottom of the sidebar)
         ctk.CTkLabel(
-            side, text="Version 1.3.0", text_color=TEXT_FAINT,
+            side, text=f"Version {APP_VERSION}", text_color=TEXT_FAINT,
             font=ctk.CTkFont(size=11),
         ).grid(row=100, column=0, padx=20, pady=18, sticky="w")
 
@@ -777,7 +855,7 @@ class ReleaseNotesApp(ctk.CTk):
             ("release",      "↻", "DevNotes → ReleaseNotes",
              "Regenerate ReleaseNotes.txt from\nan existing DevNotes file."),
             ("home",         "✓", "About",
-             "Release notes automation\ntool, v1.3.0."),
+             f"Lam Research release notes\nautomation, v{APP_VERSION}."),
         ])
         for i, (target, icon, title, desc) in enumerate(cards):
             self._home_card(grid, i // 2, i % 2, icon, title, desc, target)

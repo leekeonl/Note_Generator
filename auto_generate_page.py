@@ -23,6 +23,7 @@ from pathlib import Path
 from tkinter import messagebox
 import os
 import re
+import sys
 import tempfile
 
 import customtkinter as ctk
@@ -48,6 +49,18 @@ FALLBACK_BRANCH = "master"
 
 PR_RE = re.compile(r'\bPR-\d+(?:-\d+)?\b', re.IGNORECASE)
 CHECKIN_ID_RE = re.compile(r'\b\d+\.\d+\b')
+
+
+def _app_base_dir() -> Path:
+    """
+    Folder to use as the default output location when no DevNotes path is
+    given. For a PyInstaller build this is the folder the .exe actually sits
+    in (NOT the temporary _MEIPASS unpack dir, which is wiped on exit). When
+    running from source it's the folder this file lives in.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
 
 class AutoGeneratePage(ctk.CTkFrame):
@@ -86,7 +99,8 @@ class AutoGeneratePage(ctk.CTkFrame):
         ).grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
             header,
-            text=("Fetch check-in notes from Phabricator and run the full "
+            text=("Fetch check-in notes from Bitbucket (Phabricator fallback) "
+                  "and run the full "
                   "pipeline.  No Notes.txt needed — fetched automatically."),
             text_color=TEXT_MUTED, font=ctk.CTkFont(size=13),
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
@@ -226,7 +240,7 @@ class AutoGeneratePage(ctk.CTkFrame):
         self.paste_box = ctk.CTkTextbox(
             self.paste_frame, height=120, fg_color="white",
             border_color=BORDER, border_width=1,
-            font=ctk.CTkFont(size=12, family="Courier"),
+            font=ctk.CTkFont(size=12, family="Consolas"),
         )
         self.paste_box.grid(row=1, column=0, sticky="ew")
 
@@ -358,26 +372,84 @@ class AutoGeneratePage(ctk.CTkFrame):
         return ordered
 
     def _build_sources(self, primary_branch):
+        """
+        Build the ordered list of note sources to try, lowest priority
+        number first.
+
+        Transition strategy (Bitbucket is becoming the primary system):
+          1. Bitbucket master                  (priority 1)  — primary
+          2. Phabricator primary_branch         (priority 10) — if given
+          3. Phabricator FALLBACK_BRANCH        (priority 99) — last resort
+
+        Either backend may be unconfigured during the transition. We add
+        whichever ones ARE configured. Only if NEITHER is configured do we
+        return an error.
+        """
+        sources: list[NoteSource] = []
+        config_notes: list[str] = []
+
+        # --- Bitbucket (primary) -----------------------------------------
+        try:
+            from sources.bitbucket_source import BitbucketSource
+            # The mirror has a real git branch per service pack (SP17..SP35,
+            # master, HF branches). So the user's Branch field is a genuine
+            # git ref we page commits from directly. SP35 -> commits/SP35,
+            # which returns the SP35 copy of each PR with its SP35 check-in
+            # number. Blank falls back to master.
+            bb_branch = (primary_branch or "").strip() or "master"
+            bb = BitbucketSource(branch=bb_branch, priority=1)
+            bb_err = bb._config_error()
+            if bb_err:
+                config_notes.append(f"Bitbucket not configured: {bb_err}")
+            else:
+                sources.append(bb)
+        except ImportError as e:
+            config_notes.append(f"Could not load BitbucketSource: {e}")
+
+        # --- Phabricator (fallback) --------------------------------------
         try:
             from sources.phab_source import PhabSource
+            probe = PhabSource(branch=primary_branch or FALLBACK_BRANCH)
+            phab_err = probe._config_error()
+            if phab_err:
+                config_notes.append(f"Phabricator not configured: {phab_err}")
+            else:
+                if (primary_branch and primary_branch.strip()
+                        and primary_branch != FALLBACK_BRANCH):
+                    sources.append(PhabSource(branch=primary_branch.strip(),
+                                              priority=10))
+                sources.append(PhabSource(branch=FALLBACK_BRANCH, priority=99))
         except ImportError as e:
-            return [], f"Could not load PhabSource module: {e}"
-        probe = PhabSource(branch=primary_branch or FALLBACK_BRANCH)
-        config_err = probe._config_error()
-        if config_err:
-            return [], (f"Phabricator is not configured.\n\n{config_err}\n\n"
+            config_notes.append(f"Could not load PhabSource: {e}")
+
+        if not sources:
+            # Nothing is usable — surface the collected reasons.
+            detail = "\n".join(config_notes) if config_notes else "No sources available."
+            return [], (f"No note source is configured.\n\n{detail}\n\n"
                         f"Set the missing environment variable(s) and restart the app.")
-        sources: list[NoteSource] = []
-        if primary_branch and primary_branch.strip() and primary_branch != FALLBACK_BRANCH:
-            sources.append(PhabSource(branch=primary_branch.strip(), priority=1))
-        sources.append(PhabSource(branch=FALLBACK_BRANCH, priority=99))
+
         return sources, None
 
     def _on_run(self):
-        devnotes = self.devnotes_field.get()
+        devnotes = self.devnotes_field.get().strip()
         if not devnotes:
-            messagebox.showerror("Error", "Select a DevNotes file.")
-            return
+            # Blank field: for a new patch, default to a DevNotes.txt sitting
+            # next to the app (exe/script). Merge needs an explicit existing
+            # file, so it still errors.
+            if self.mode_var.get() == "merge":
+                messagebox.showerror(
+                    "Error",
+                    "Select an existing DevNotes file to merge into."
+                )
+                return
+            devnotes = str(_app_base_dir() / "DevNotes.txt")
+            # If that default file already exists and no branch was typed,
+            # auto-detect the branch from it (the field being blank means
+            # _on_devnotes_change never ran on this path).
+            if not self.branch_var.get().strip():
+                tok = extract_branch_from_devnotes(devnotes)
+                if tok:
+                    self.branch_var.set(tok)
 
         mode = self.mode_var.get()
         if mode == "new":
@@ -404,6 +476,26 @@ class AutoGeneratePage(ctk.CTkFrame):
             return
 
         primary = self.branch_var.get().strip() or self._detected_branch
+
+        # Brand-new DevNotes (file doesn't exist yet): there's nothing to
+        # auto-detect a branch from, so the user must type one.
+        creating_new = not Path(devnotes).exists()
+        if creating_new and mode == "merge":
+            messagebox.showerror(
+                "Error",
+                "That DevNotes file doesn't exist yet, so there's no patch to "
+                "merge into. Use 'New patch' to create it."
+            )
+            return
+        if creating_new and not (primary and primary.strip()):
+            messagebox.showerror(
+                "Error",
+                "No DevNotes file found at that path, so the branch can't be "
+                "auto-detected.\n\nType the branch in Step 2 (e.g. SP37ETCH) "
+                "to create a new DevNotes from scratch."
+            )
+            return
+
         sources, err = self._build_sources(primary)
         if err:
             messagebox.showerror("Configuration", err)
@@ -411,7 +503,7 @@ class AutoGeneratePage(ctk.CTkFrame):
 
         # Fetch
         self.status_label.configure(
-            text=f"Fetching {len(queries)} item(s) from Phabricator…",
+            text=f"Fetching {len(queries)} item(s)…",
             text_color=self._TEXT_MUTED)
         self.run_btn.configure(state="disabled", text="Fetching…")
         self.update_idletasks()
@@ -450,6 +542,7 @@ class AutoGeneratePage(ctk.CTkFrame):
         sel_dialog = CheckinSelectionDialog(
             self.app, merged.text,
             colors=(self._GREEN, self._GREEN_HOVER, self._TEXT, self._TEXT_MUTED, self._BORDER),
+            source_name=merged.chosen_source,
         )
         filtered_text = sel_dialog.show()
         if filtered_text is None:
@@ -465,15 +558,26 @@ class AutoGeneratePage(ctk.CTkFrame):
             self.status_label.configure(text="No check-ins selected.", text_color="#a16207")
             return
 
+        # Work out which requested PR/ID never resolved to a check-in, plus
+        # the PR→check-in map, so BOTH new-patch and merge show the same
+        # "could not be resolved" warning + resolution info in the preview.
+        matched_keys = set(merged.matched_queries.keys())
+        unresolved = [q for q in queries if q not in matched_keys]
+        pr_map = {q: cks for q, cks in merged.matched_queries.items()
+                  if str(q).upper().startswith("PR-")}
+
         if mode == "new":
-            self._handle_new_patch(devnotes, patch_label, queries, filtered_text)
+            self._handle_new_patch(devnotes, patch_label, queries, filtered_text,
+                                   base_version=primary)
         else:
-            self._handle_merge(devnotes, patch_label, filtered_text)
+            self._handle_merge(devnotes, patch_label, filtered_text,
+                               unresolved_ids=unresolved, pr_to_checkins=pr_map)
 
     # ------------------------------------------------------------------
     # New patch (existing flow)
     # ------------------------------------------------------------------
-    def _handle_new_patch(self, devnotes, patch_label, queries, notes_text):
+    def _handle_new_patch(self, devnotes, patch_label, queries, notes_text,
+                          base_version=None):
         from full_pipeline import build_preview, commit_preview
         from ReleaseNotesTool_UI_ctk import PreviewDialog
 
@@ -486,12 +590,14 @@ class AutoGeneratePage(ctk.CTkFrame):
             prefix="auto_checkinid_") as tmp:
             tmp.write("\n".join(queries)); checkinid_tmp = tmp.name
 
+        was_new = not Path(devnotes).exists()
         try:
             preview = build_preview(
                 devnotes_file=devnotes,
                 patch_number=patch_label,
                 checkinid_file=checkinid_tmp,
                 notes_file=notes_tmp,
+                base_version=base_version,
             )
         except Exception as e:
             messagebox.showerror("Pipeline error", f"Could not build preview:\n\n{e}")
@@ -509,14 +615,16 @@ class AutoGeneratePage(ctk.CTkFrame):
         except Exception as e:
             messagebox.showerror("Error", f"Commit failed:\n{e}")
             return
-        msg = f"Updated:\n{dev}\n\nCreated:\n{rel}"
+        verb = "Created" if was_new else "Updated"
+        msg = f"{verb}:\n{dev}\n\nCreated:\n{rel}"
         if bak: msg += f"\n\nBackup saved as:\n{bak}"
         messagebox.showinfo("Success", msg)
 
     # ------------------------------------------------------------------
     # Merge (new behavior)
     # ------------------------------------------------------------------
-    def _handle_merge(self, devnotes, patch_label, notes_text):
+    def _handle_merge(self, devnotes, patch_label, notes_text,
+                      unresolved_ids=None, pr_to_checkins=None):
         from merge_pipeline import build_merge_preview, commit_merge_preview
         from ReleaseNotesTool_UI_ctk import PreviewDialog
 
@@ -565,6 +673,12 @@ class AutoGeneratePage(ctk.CTkFrame):
         # Step 3 — show preview via the existing dialog
         try:
             adapter = _MergePreviewAdapter(preview)
+            # Surface the same "could not be resolved" warning + PR→check-in
+            # resolution info that the new-patch flow shows.
+            if unresolved_ids:
+                adapter.missing_checkin_ids = list(unresolved_ids)
+            if pr_to_checkins:
+                adapter.pr_to_checkins = dict(pr_to_checkins)
             dialog = PreviewDialog(self.app, adapter)
         except Exception as e:
             messagebox.showerror("Preview error", f"Could not open preview:\n\n{e}")
@@ -597,11 +711,10 @@ class _MergePreviewAdapter:
         self.predicted_releasenotes = mp.predicted_releasenotes
         self.requested_checkin_ids = list(mp.final_checkin_ids)
         self.included_checkin_ids  = list(mp.final_checkin_ids)
+        # Defaults. _handle_merge overrides these with the real unresolved
+        # IDs and PR→check-in map from the fetch step, so the merge preview
+        # shows the same "could not be resolved" warning as new-patch mode.
         self.missing_checkin_ids   = []
-        # PR→checkins map is meaningful only in the new-patch flow (where we
-        # resolve PRs against a fresh Notes.txt). In merge mode the new
-        # check-ins came pre-resolved from Phabricator, so we hand the
-        # PreviewDialog an empty dict — it just hides that section.
         self.pr_to_checkins = {}
 
 
@@ -809,11 +922,12 @@ class CheckinSelectionDialog(ctk.CTkToplevel):
     Always shown, even for a single check-in — keeps the user in control
     even when "auto" feels a little too automatic.
     """
-    def __init__(self, parent, notes_text: str, colors):
+    def __init__(self, parent, notes_text: str, colors, source_name: str = "Source"):
         super().__init__(parent)
         green, green_hover, text, text_muted, border = colors
         self._notes_text = notes_text
         self._blocks = _split_notes_into_blocks(notes_text)
+        self._source_name = source_name or "Source"
         self._result: str | None = None
         self._vars: dict[str, ctk.BooleanVar] = {}
 
@@ -826,7 +940,7 @@ class CheckinSelectionDialog(ctk.CTkToplevel):
         # Header
         ctk.CTkLabel(
             self,
-            text=f"Phabricator returned {len(self._blocks)} check-in(s)",
+            text=f"{self._source_name} returned {len(self._blocks)} check-in(s)",
             text_color=text, font=ctk.CTkFont(size=15, weight="bold"),
         ).pack(padx=20, pady=(20, 4), anchor="w")
         ctk.CTkLabel(
